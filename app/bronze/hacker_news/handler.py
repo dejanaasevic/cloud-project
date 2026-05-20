@@ -58,7 +58,7 @@ def lambda_handler(event, context):
     print(f"Collecting Hacker News data for: {date_str}")
 
     summary = {}
-    put_counter = 0  # list so it can be mutated inside nested functions
+    put_counter = 0
 
     for item_type in ITEM_TYPES:
         print(f"Fetching: {item_type}")
