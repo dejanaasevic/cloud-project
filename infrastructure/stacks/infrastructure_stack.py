@@ -68,6 +68,22 @@ class InfrastructureStack(cdk.Stack):
 
         bronze_bucket.grant_put(lambda_role)
 
+        # role for twitter
+        twitter_role = iam.Role(
+            self,
+            "TwitterRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"), 
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                )
+            ],
+        )
+
+        # allow twitter role to put and read data from the bronze bucket
+        bronze_bucket.grant_put(twitter_role)
+        bronze_bucket.grant_read(twitter_role)
+
         # ==== Lambdas =====
 
         hacker_news_fn = lambda_.Function(
@@ -82,6 +98,14 @@ class InfrastructureStack(cdk.Stack):
             environment={
                 "BRONZE_BUCKET": bronze_bucket.bucket_name,
                 "MAX_PUTS": "500",  # set a 0 for unlimited S3 PUTs
+            },
+        )
+
+        # lambda for checking whether the twitter file has been uploaded to s3 or not
+        twitter_fn = lambda_.Function(self, "TwitterIngestor", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler",
+            code=lambda_.Code.from_asset("../app/bronze/twitter"), role=twitter_role, memory_size=128, timeout=Duration.minutes(1),
+            environment={
+                "BRONZE_TWITTER_BUCKET": bronze_bucket.bucket_name,
             },
         )
 
