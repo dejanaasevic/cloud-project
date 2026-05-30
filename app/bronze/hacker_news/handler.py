@@ -85,7 +85,7 @@ def lambda_handler(event, context):
                     "limit_reached": True,
                 }
 
-            key = f"{base_key}/data_{file_index}.json"
+            key = f"{base_key}/hackernews_{file_index}.json"
             s3.put_object(
                 Bucket=BUCKET,
                 Key=key,

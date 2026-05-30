@@ -10,6 +10,7 @@ from aws_cdk import (
     RemovalPolicy,
 )
 from constructs import Construct
+import os
 
 
 class InfrastructureStack(cdk.Stack):
@@ -68,6 +69,18 @@ class InfrastructureStack(cdk.Stack):
 
         bronze_bucket.grant_put(lambda_role)
 
+        # role for twitter
+        twitter_role = iam.Role(
+            self, "TwitterRole", assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"), 
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+            ],
+        )
+
+        # allow twitter role to put and read data from the bronze bucket
+        bronze_bucket.grant_put(twitter_role)
+        bronze_bucket.grant_read(twitter_role)
+
         # ==== Lambdas =====
 
         hacker_news_fn = lambda_.Function(
@@ -83,6 +96,22 @@ class InfrastructureStack(cdk.Stack):
                 "BRONZE_BUCKET": bronze_bucket.bucket_name,
                 "MAX_PUTS": "500",  # set a 0 for unlimited S3 PUTs
             },
+        )
+        
+        # add layer for pandas importing since its not included in the default aws lambda environment
+        pandas_layer = lambda_.LayerVersion.from_layer_version_arn(self, "PandasLayer",
+                                                                   "arn:aws:lambda:eu-central-1:336392948345:layer:AWSSDKPandas-Python312:27",)
+        
+        # add lambda fucntion for twitter data ingestion and filtering
+        twitter_fn = lambda_.Function(self, "TwitterIngestor", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler", 
+                                    code=lambda_.Code.from_asset("../app/bronze/twitter"), role=twitter_role, layers=[pandas_layer],
+                                    ephemeral_storage_size=cdk.Size.mebibytes(1024),
+                                    memory_size=512,  timeout=Duration.minutes(10),  
+                                    environment={
+                                        "BRONZE_TWITTER_BUCKET": bronze_bucket.bucket_name,
+                                        "KAGGLE_KEY": os.environ.get("KAGGLE_KEY", ""),
+                                        "KAGGLE_USERNAME": os.environ.get("KAGGLE_USERNAME", ""),
+                                    },
         )
 
         # EventBridge Daily Schedule
