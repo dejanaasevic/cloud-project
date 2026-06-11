@@ -24,16 +24,19 @@ def lambda_handler(event, context):
     else:
         print("Twitter file does not exist in the bronze bucket, uploading yesterday's data.")
 
+        # generate list of date
+        date = generate_date()
+        print(f"Looking for tweets on this date: {date}")
+
         # stream the dataset from kaggle in chunks to avoid memory issues
         df_chunks = stream_kaggle_csv_chunks()
         
         # filter the dataset to contain only tweets from yesterday
-        filtered_df = filter_yesterday_tweets(df_chunks)
+        filtered_df = filter_yesterday_tweets(df_chunks, date)
         
         # upload tweets as a json file to the S3 bucket
         upload_as_json(filtered_df)
         
-
 
 def already_exists() -> bool:
 
@@ -61,13 +64,29 @@ def already_exists() -> bool:
         else:
             raise e
 
+def generate_date() -> date:
+    """Maps any date to a known date range in the dataset (2020-07-25 to 2020-08-30)."""
+    yesterday = date.today() - timedelta(days=1)
+    
+    # dataset only has data from 2020-07-25 to 2020-08-30
+    dataset_start = date(2020, 7, 25)
+    dataset_end = date(2020, 8, 30)
+    dataset_range = (dataset_end - dataset_start).days
+    
+    # map yesterday's day-of-year to a date within the dataset range
+    day_of_year = yesterday.timetuple().tm_yday
+    mapped_offset = day_of_year % dataset_range
+    mapped_date = dataset_start + timedelta(days=mapped_offset)
+    
+    print(f"Yesterday ({yesterday}) mapped to dataset date: {mapped_date}")
+    return mapped_date
 
 def stream_kaggle_csv_chunks(chunk_size=10_000):
 
     """Stream the dataset from kaggle in chunks to avoid memory issues."""
 
     # kaggle api endpoint for downloading the dataset as a zip file
-    url = "https://www.kaggle.com/api/v1/datasets/download/kaushiksuresh147/bitcoin-tweets/Bitcoin_tweets.csv"
+    url = "https://www.kaggle.com/api/v1/datasets/download/gpreda/covid19-tweets/covid19_tweets.csv"
     
     # get kaggle credentials from environment variables
     username = os.environ["KAGGLE_USERNAME"]
@@ -79,7 +98,7 @@ def stream_kaggle_csv_chunks(chunk_size=10_000):
         r.raise_for_status()
         
         # write the zip to /tmp in chunks and don't load the whole file in memory
-        zip_path = "/tmp/tweets.zip"
+        zip_path = "/tmp/covid_tweets.zip"
         with open(zip_path, "wb") as f:
             # take the response in 8MB chunks and write to file
             for chunk in r.iter_content(chunk_size=8 * 1024 * 1024): 
@@ -87,19 +106,17 @@ def stream_kaggle_csv_chunks(chunk_size=10_000):
         
         # read the csv file from the zip in chunks using pandas and yield each chunk as a dataframe
         with zipfile.ZipFile(zip_path) as zf:
-            with zf.open("Bitcoin_tweets.csv") as csv_file:
+            with zf.open("covid19_tweets.csv") as csv_file:
                 buffer = io.TextIOWrapper(csv_file, encoding="utf-8", errors="replace")
                 # read the csv in chunks and yield each chunk as a dataframe
                 for chunk in pd.read_csv(buffer, chunksize=chunk_size):
                     yield chunk
 
 
-def filter_yesterday_tweets(df_chunks):
+def filter_yesterday_tweets(df_chunks, date : date):
 
-    """Filter the dataset to contain only tweets from yesterday."""
+    """Filter the dataset to contain only tweets written on tthe date."""
     
-    # calculate yesterday's date
-    yesterday = date.today() - timedelta(days=1)
     chunks = []
 
     for chunk in df_chunks:
@@ -109,7 +126,7 @@ def filter_yesterday_tweets(df_chunks):
         chunk = chunk.dropna(subset=["date"]) 
 
         # create a filter to select only wanted rows
-        chunk_filter = chunk["date"].dt.date == yesterday
+        chunk_filter = chunk["date"].dt.date == date
 
         # apply filter to the chunk and keep only yesterday's tweets
         filtered_chunk = chunk[chunk_filter]
