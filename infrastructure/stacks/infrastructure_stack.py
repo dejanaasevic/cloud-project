@@ -69,17 +69,17 @@ class InfrastructureStack(cdk.Stack):
 
         bronze_bucket.grant_put(lambda_role)
 
-        # role for twitter
-        twitter_role = iam.Role(
-            self, "TwitterRole", assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"), 
+        # role for bronze twitter layer
+        bronze_twitter_role = iam.Role(
+            self, "BronzeTwitterRole", assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"), 
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
             ],
         )
 
-        # allow twitter role to put and read data from the bronze bucket
-        bronze_bucket.grant_put(twitter_role)
-        bronze_bucket.grant_read(twitter_role)
+        # allow bronze twitter role to put and read data from the bronze bucket
+        bronze_bucket.grant_put(bronze_twitter_role)
+        bronze_bucket.grant_read(bronze_twitter_role)
 
         # ==== Lambdas =====
 
@@ -103,8 +103,8 @@ class InfrastructureStack(cdk.Stack):
                                                                    "arn:aws:lambda:eu-central-1:336392948345:layer:AWSSDKPandas-Python312:27",)
         
         # add lambda fucntion for twitter data ingestion and filtering
-        twitter_fn = lambda_.Function(self, "TwitterIngestor", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler", 
-                                    code=lambda_.Code.from_asset("../app/bronze/twitter"), role=twitter_role, layers=[pandas_layer],
+        bronze_twitter_fn = lambda_.Function(self, "TwitterIngestor", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler", 
+                                    code=lambda_.Code.from_asset("../app/bronze/twitter"), role=bronze_twitter_role, layers=[pandas_layer],
                                     ephemeral_storage_size=cdk.Size.mebibytes(1024),
                                     memory_size=512,  timeout=Duration.minutes(10),  
                                     environment={
@@ -114,6 +114,9 @@ class InfrastructureStack(cdk.Stack):
                                     },
         )
 
+        # bronze twitter event bridge - 01:00 UTC
+        events.Rule(self, "DailyBronzeTwitterSchedule", schedule=events.Schedule.cron(minute="0", hour="1"), targets=[targets.LambdaFunction(bronze_twitter_fn)],)
+
         # EventBridge Daily Schedule
         # Runs at 01:00 UTC every day
         # events.Rule(
@@ -122,3 +125,37 @@ class InfrastructureStack(cdk.Stack):
         #     schedule=events.Schedule.cron(minute="0", hour="1"),
         #     targets=[targets.LambdaFunction(hacker_news_fn)],
         # )
+
+        # silver bucket
+        silver_bucket = s3.Bucket(self, "SilverBucket", removal_policy=RemovalPolicy.RETAIN,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            lifecycle_rules=[
+                s3.LifecycleRule(expiration=Duration.days(14),)
+            ],
+        )
+
+        # allow silver twitter role to read from the bronze bucket and read/write to the silver bucket
+        silver_twitter_role = iam.Role(
+            self, "SilverTwitterRole", assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"), 
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+            ],
+        )
+
+        bronze_bucket.grant_read(silver_twitter_role)
+        silver_bucket.grant_read_write(silver_twitter_role)
+
+        # add lambda fucntion for twitter data normalization
+        silver_twitter_fn = lambda_.Function(self, "SilverTwitterProcessor", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler", 
+                                    code=lambda_.Code.from_asset("../app/silver/twitter"), role=silver_twitter_role, layers=[pandas_layer],
+                                    memory_size=512,  timeout=Duration.minutes(5),  
+                                    environment={
+                                        "BRONZE_TWITTER_BUCKET": bronze_bucket.bucket_name,
+                                        "SILVER_TWITTER_BUCKET": silver_bucket.bucket_name,
+                                    },
+        )
+
+        # silver twitter event bridge - 02:00 UTC  
+        events.Rule(self, "DailySilverTwitterSchedule", schedule=events.Schedule.cron(minute="0", hour="2"),targets=[targets.LambdaFunction(silver_twitter_fn)],)
+
+

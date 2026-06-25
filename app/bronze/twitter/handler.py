@@ -25,14 +25,14 @@ def lambda_handler(event, context):
         print("Twitter file does not exist in the bronze bucket, uploading yesterday's data.")
 
         # generate list of date
-        date = generate_date()
-        print(f"Looking for tweets on this date: {date}")
+        mapped_date = generate_date()
+        print(f"Looking for tweets on this date: {mapped_date}")
 
         # stream the dataset from kaggle in chunks to avoid memory issues
         df_chunks = stream_kaggle_csv_chunks()
         
         # filter the dataset to contain only tweets from yesterday
-        filtered_df = filter_yesterday_tweets(df_chunks, date)
+        filtered_df = filter_yesterday_tweets(df_chunks, mapped_date)
         
         # upload tweets as a json file to the S3 bucket
         upload_as_json(filtered_df)
@@ -65,7 +65,9 @@ def already_exists() -> bool:
             raise e
 
 def generate_date() -> date:
+    
     """Maps any date to a known date range in the dataset (2020-07-25 to 2020-08-30)."""
+    
     yesterday = date.today() - timedelta(days=1)
     
     # dataset only has data from 2020-07-25 to 2020-08-30
