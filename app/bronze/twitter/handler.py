@@ -7,7 +7,7 @@ import pandas as pd
 import json
 import requests
 import io
-
+import random
 
 
 def lambda_handler(event, context):
@@ -24,15 +24,16 @@ def lambda_handler(event, context):
     else:
         print("Twitter file does not exist in the bronze bucket, uploading yesterday's data.")
 
-        # generate list of date
-        mapped_date = generate_date()
-        print(f"Looking for tweets on this date: {mapped_date}")
-
-        # stream the dataset from kaggle in chunks to avoid memory issues
+        # stream the dataset from kaggle in chunks
         df_chunks = stream_kaggle_csv_chunks()
-        
-        # filter the dataset to contain only tweets from yesterday
-        filtered_df = filter_yesterday_tweets(df_chunks, mapped_date)
+
+        # try to get any data (random fallback)
+        filtered_df = get_any_data(df_chunks)
+
+        if filtered_df.empty:
+            print("Still no data found after random attempts.")
+        else:
+            print(f"Found {len(filtered_df)} tweets")
         
         # upload tweets as a json file to the S3 bucket
         upload_as_json(filtered_df)
@@ -64,24 +65,25 @@ def already_exists() -> bool:
         else:
             raise e
 
-def generate_date() -> date:
-    
-    """Maps any date to a known date range in the dataset (2020-07-25 to 2020-08-30)."""
-    
-    yesterday = date.today() - timedelta(days=1)
-    
-    # dataset only has data from 2020-07-25 to 2020-08-30
+
+def get_any_data(df_chunks, attempts=10):
+    all_chunks = list(df_chunks)
+
     dataset_start = date(2020, 7, 25)
     dataset_end = date(2020, 8, 30)
-    dataset_range = (dataset_end - dataset_start).days
-    
-    # map yesterday's day-of-year to a date within the dataset range
-    day_of_year = yesterday.timetuple().tm_yday
-    mapped_offset = day_of_year % dataset_range
-    mapped_date = dataset_start + timedelta(days=mapped_offset)
-    
-    print(f"Yesterday ({yesterday}) mapped to dataset date: {mapped_date}")
-    return mapped_date
+    total_days = (dataset_end - dataset_start).days
+
+    for _ in range(attempts):
+        random_day = dataset_start + timedelta(days=random.randint(0, total_days))
+
+        print(f"Trying random date: {random_day}")
+
+        result = filter_yesterday_tweets(all_chunks, random_day)
+        if not result.empty:
+            return result
+
+    return pd.DataFrame()
+
 
 def stream_kaggle_csv_chunks(chunk_size=10_000):
 
