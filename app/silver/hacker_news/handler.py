@@ -84,6 +84,7 @@ def lambda_handler(event, context):
         dataset=True,
         partition_cols=["year", "month", "day"],
         mode="append",
+        filename_prefix="hacker_news_",
     )
 
     wr.s3.to_parquet(
@@ -134,7 +135,7 @@ def already_exists() -> bool:
     )
 
     existing = wr.s3.list_objects(path)
-    if existing:
+    if any("hacker_news_" in f for f in existing):
         print(f"Silver data already exists at {path}, skipping.")
         return True
 

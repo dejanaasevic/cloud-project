@@ -43,10 +43,11 @@ class InfrastructureStack(cdk.Stack):
             service=ec2.GatewayVpcEndpointAwsService.S3,
         )
 
-        # ==== S3 Bronze Bucket ==== 
+        # ==== S3 Bronze Bucket ====
         bronze_bucket = s3.Bucket(
             self,
             "BronzeBucket",
+            bucket_name=f"cloud-project-bronze-{self.account}-{self.region}",
             removal_policy=RemovalPolicy.RETAIN,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             lifecycle_rules=[
@@ -91,7 +92,7 @@ class InfrastructureStack(cdk.Stack):
             code=lambda_.Code.from_asset("../app/bronze/hacker_news"),
             role=lambda_role,
             memory_size=128,
-            timeout=Duration.minutes(5),
+            timeout=Duration.minutes(10), 
             environment={
                 "BRONZE_BUCKET": bronze_bucket.bucket_name,
                 "MAX_PUTS": "500",  # set a 0 for unlimited S3 PUTs
@@ -127,7 +128,11 @@ class InfrastructureStack(cdk.Stack):
         # )
 
         # silver bucket
-        silver_bucket = s3.Bucket(self, "SilverBucket", removal_policy=RemovalPolicy.RETAIN,
+        silver_bucket = s3.Bucket(
+            self,
+            "SilverBucket",
+            bucket_name=f"cloud-project-silver-{self.account}-{self.region}",
+            removal_policy=RemovalPolicy.RETAIN,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             lifecycle_rules=[
                 s3.LifecycleRule(expiration=Duration.days(14),)
@@ -155,7 +160,42 @@ class InfrastructureStack(cdk.Stack):
                                     },
         )
 
-        # silver twitter event bridge - 02:00 UTC  
+        # silver twitter event bridge - 02:00 UTC
         events.Rule(self, "DailySilverTwitterSchedule", schedule=events.Schedule.cron(minute="0", hour="2"),targets=[targets.LambdaFunction(silver_twitter_fn)],)
+
+        # ==== Silver Hacker News ====
+
+        silver_hn_role = iam.Role(
+            self, "SilverHackerNewsRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+            ],
+        )
+
+        bronze_bucket.grant_read(silver_hn_role)
+        silver_bucket.grant_read_write(silver_hn_role)
+
+        silver_hn_fn = lambda_.Function(
+            self, "SilverHackerNewsProcessor",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.lambda_handler",
+            code=lambda_.Code.from_asset("../app/silver/hacker_news"),
+            role=silver_hn_role,
+            layers=[pandas_layer],
+            memory_size=512,
+            timeout=Duration.minutes(10),
+            environment={
+                "BRONZE_HN_BUCKET": bronze_bucket.bucket_name,
+                "SILVER_HN_BUCKET": silver_bucket.bucket_name,
+            },
+        )
+
+        # silver HN event bridge
+        # events.Rule(
+        #     self, "DailySilverHackerNewsSchedule",
+        #     schedule=events.Schedule.cron(minute="0", hour="3"),
+        #     targets=[targets.LambdaFunction(silver_hn_fn)],
+        # )
 
 

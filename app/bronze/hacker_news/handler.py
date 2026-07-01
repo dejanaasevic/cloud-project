@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 s3 = boto3.client("s3")
 BUCKET = os.environ["BRONZE_BUCKET"]
 SEARCH_API = "https://hn.algolia.com/api/v1/search_by_date"
-FIREBASE_USER_API = "https://hacker-news.firebaseio.com/v1/user/{}.json"
+FIREBASE_USER_API = "https://hacker-news.firebaseio.com/v0/user/{}.json"
 BATCH_SIZE = 1000
 ITEM_TYPES = ["story", "comment", "ask_hn", "job", "poll"]
 MAX_PUTS = int(os.environ.get("MAX_PUTS", 500))
