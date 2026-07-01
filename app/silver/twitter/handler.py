@@ -49,9 +49,9 @@ def lambda_handler(event, context):
     posts_df = posts_df.drop_duplicates(subset=["post_id"])
 
     # add partition columns extracted from created_at timestamp
-    posts_df["year"]  = posts_df["created_at"].str[:4]
-    posts_df["month"] = posts_df["created_at"].str[5:7]
-    posts_df["day"]   = posts_df["created_at"].str[8:10]
+    posts_df["year"]  = str(yesterday.year)
+    posts_df["month"] = f"{yesterday.month:02d}"
+    posts_df["day"]   = f"{yesterday.day:02d}"
 
     print(f"Writing {len(posts_df)} posts and {len(users_df)} users to silver bucket.")
 
