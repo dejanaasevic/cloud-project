@@ -59,7 +59,7 @@ def lambda_handler(event, context):
 
     posts_path = f"s3://{silver_bucket}/posts/"
     print(f"Writing posts to: {posts_path}")
-    wr.s3.to_parquet(df=posts_df, path=posts_path, dataset=True, partition_cols=["year", "month", "day"], mode="append")
+    wr.s3.to_parquet(df=posts_df, path=posts_path, dataset=True, partition_cols=["year", "month", "day"], mode="append", filename_prefix="twitter_")
 
     users_path = f"s3://{silver_bucket}/users/"
     print(f"Writing users to: {users_path}")
@@ -78,7 +78,7 @@ def already_exists() -> bool:
     path = f"s3://{silver_bucket}/posts/year={yesterday.year}/month={yesterday.month:02d}/day={yesterday.day:02d}/"
 
     existing = wr.s3.list_objects(path)
-    if existing:
+    if any("twitter_" in f for f in existing):
         print(f"Silver data already exists at {path}, skipping.")
         return True
 

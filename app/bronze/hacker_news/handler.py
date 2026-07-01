@@ -4,13 +4,16 @@ import urllib.request
 import urllib.parse
 import os
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 s3 = boto3.client("s3")
 BUCKET = os.environ["BRONZE_BUCKET"]
 SEARCH_API = "https://hn.algolia.com/api/v1/search_by_date"
+FIREBASE_USER_API = "https://hacker-news.firebaseio.com/v0/user/{}.json"
 BATCH_SIZE = 1000
 ITEM_TYPES = ["story", "comment", "ask_hn", "job", "poll"]
-MAX_PUTS = int(os.environ.get("MAX_PUTS", 500))  # 0 for unlimited
+MAX_PUTS = int(os.environ.get("MAX_PUTS", 500))
+USER_FETCH_WORKERS = int(os.environ.get("USER_FETCH_WORKERS", 20))
 
 
 def fetch_json(url: str) -> dict | None:
@@ -23,9 +26,8 @@ def fetch_json(url: str) -> dict | None:
 
 
 def fetch_pages(item_type: str, ts_start: int, ts_end: int):
-    """Generator that yields one page per call."""
+    """Generator that yields one page of Algolia hits at a time."""
     page = 0
-
     while True:
         params = urllib.parse.urlencode({
             "tags": item_type,
@@ -41,12 +43,23 @@ def fetch_pages(item_type: str, ts_start: int, ts_end: int):
         nb_pages = result.get("nbPages", 1)
         print(f"  [{item_type}] page {page + 1}/{nb_pages} — {len(result['hits'])} items")
 
-        yield result["hits"]  # yield the page, pause until next call
+        yield result["hits"]
 
         if page >= nb_pages - 1:
             break
 
         page += 1
+
+
+def fetch_user(username: str) -> dict | None:
+    """Fetch a single user profile from the HN Firebase API."""
+    url = FIREBASE_USER_API.format(urllib.parse.quote(username))
+    data = fetch_json(url)
+    if data:
+        # 'submitted' lists every item ID the user ever posted —
+        # can be thousands of entries, not needed here and bloats storage.
+        data.pop("submitted", None)
+    return data
 
 
 def lambda_handler(event, context):
@@ -59,6 +72,7 @@ def lambda_handler(event, context):
 
     summary = {}
     put_counter = 0
+    all_authors: set[str] = set()
 
     for item_type in ITEM_TYPES:
         print(f"Fetching: {item_type}")
@@ -73,7 +87,6 @@ def lambda_handler(event, context):
         )
 
         for page_hits in fetch_pages(item_type, ts_start, ts_end):
-            # Check limit before each PUT
             if MAX_PUTS and put_counter >= MAX_PUTS:
                 print(f"Reached limit of {MAX_PUTS} PUT requests, stopping.")
                 summary[item_type] = total_items
@@ -84,6 +97,10 @@ def lambda_handler(event, context):
                     "total_puts": put_counter,
                     "limit_reached": True,
                 }
+
+            for item in page_hits:
+                if item.get("author"):
+                    all_authors.add(item["author"])
 
             key = f"{base_key}/hackernews_{file_index}.json"
             s3.put_object(
@@ -98,7 +115,36 @@ def lambda_handler(event, context):
             print(f"  Written {len(page_hits)} items -> {key} (PUT #{put_counter})")
 
         summary[item_type] = total_items
-        print(f"  Total: {total_items} items in {file_index} file(s)")
+        print(f"  Total {item_type}: {total_items} items in {file_index} file(s)")
+
+    # fetch user karma
+    print(f"Fetching karma for {len(all_authors)} unique users...")
+    users = []
+    with ThreadPoolExecutor(max_workers=USER_FETCH_WORKERS) as executor:
+        futures = {executor.submit(fetch_user, u): u for u in all_authors}
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                users.append(result)
+
+    print(f"  Fetched {len(users)}/{len(all_authors)} user profiles.")
+
+    user_key = (
+        f"hacker_news/users"
+        f"/year={date_str[:4]}"
+        f"/month={date_str[5:7]}"
+        f"/day={date_str[8:]}"
+        f"/users.json"
+    )
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=user_key,
+        Body=json.dumps(users, ensure_ascii=False),
+        ContentType="application/json",
+    )
+    put_counter += 1
+    print(f"  Written {len(users)} users -> {user_key} (PUT #{put_counter})")
+    summary["users"] = len(users)
 
     print(f"Done. Summary: {summary}, total PUTs: {put_counter}")
     return {
