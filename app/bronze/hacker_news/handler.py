@@ -102,7 +102,7 @@ def lambda_handler(event, context):
                 if item.get("author"):
                     all_authors.add(item["author"])
 
-            key = f"{base_key}/hackernews_{file_index}.json"
+            key = f"{base_key}/hacker_news_{file_index}.json"
             s3.put_object(
                 Bucket=BUCKET,
                 Key=key,

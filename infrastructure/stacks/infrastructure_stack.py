@@ -11,11 +11,37 @@ from aws_cdk import (
 )
 from constructs import Construct
 import os
+import boto3
+import botocore.exceptions
 
 
 class InfrastructureStack(cdk.Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
+
+        # self.account/self.region are unresolved CDK tokens for an environment-agnostic
+        # stack, so resolve concrete values directly via boto3 for the synth-time bucket check.
+        account_id = boto3.client("sts").get_caller_identity()["Account"]
+        region_name = boto3.session.Session().region_name or self.region
+
+        def get_or_create_bucket(bucket_construct_id: str, bucket_name: str, **bucket_kwargs) -> s3.IBucket:
+            """Import the bucket if it already exists in this account/region, otherwise create it.
+
+            Bucket names are globally reserved, and these buckets use RemovalPolicy.RETAIN,
+            so a stack that was deleted and redeployed would otherwise collide with its own
+            leftover buckets from a previous deploy.
+            """
+            s3_client = boto3.client("s3", region_name=region_name)
+            try:
+                s3_client.head_bucket(Bucket=bucket_name)
+                print(f"Bucket {bucket_name} already exists, importing it.")
+                return s3.Bucket.from_bucket_name(self, bucket_construct_id, bucket_name)
+            except botocore.exceptions.ClientError as e:
+                error_code = e.response["Error"]["Code"]
+                if error_code not in ("404", "NoSuchBucket"):
+                    raise
+                print(f"Bucket {bucket_name} does not exist, creating it.")
+                return s3.Bucket(self, bucket_construct_id, bucket_name=bucket_name, **bucket_kwargs)
 
         # ==== VPC ==== 
         vpc = ec2.Vpc(
@@ -44,10 +70,9 @@ class InfrastructureStack(cdk.Stack):
         )
 
         # ==== S3 Bronze Bucket ====
-        bronze_bucket = s3.Bucket(
-            self,
+        bronze_bucket = get_or_create_bucket(
             "BronzeBucket",
-            bucket_name=f"cloud-project-bronze-{self.account}-{self.region}",
+            f"cloud-project-bronze-{account_id}-{region_name}",
             removal_policy=RemovalPolicy.RETAIN,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             lifecycle_rules=[
@@ -128,10 +153,9 @@ class InfrastructureStack(cdk.Stack):
         # )
 
         # silver bucket
-        silver_bucket = s3.Bucket(
-            self,
+        silver_bucket = get_or_create_bucket(
             "SilverBucket",
-            bucket_name=f"cloud-project-silver-{self.account}-{self.region}",
+            f"cloud-project-silver-{account_id}-{region_name}",
             removal_policy=RemovalPolicy.RETAIN,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             lifecycle_rules=[
@@ -197,5 +221,50 @@ class InfrastructureStack(cdk.Stack):
         #     schedule=events.Schedule.cron(minute="0", hour="3"),
         #     targets=[targets.LambdaFunction(silver_hn_fn)],
         # )
+
+        # ==== Gold Layer ====
+
+        gold_bucket = get_or_create_bucket(
+            "GoldBucket",
+            f"cloud-project-gold-{account_id}-{region_name}",
+            removal_policy=RemovalPolicy.RETAIN,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            lifecycle_rules=[
+                s3.LifecycleRule(expiration=Duration.days(14)),
+            ],
+        )
+
+        gold_role = iam.Role(
+            self, "GoldProcessorRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+            ],
+        )
+
+        silver_bucket.grant_read(gold_role)
+        gold_bucket.grant_read_write(gold_role)
+
+        gold_fn = lambda_.Function(
+            self, "GoldProcessor",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.lambda_handler",
+            code=lambda_.Code.from_asset("../app/gold"),
+            role=gold_role,
+            layers=[pandas_layer],
+            memory_size=512,
+            timeout=Duration.minutes(10),
+            environment={
+                "SILVER_BUCKET": silver_bucket.bucket_name,
+                "GOLD_BUCKET": gold_bucket.bucket_name,
+            },
+        )
+
+        # gold event bridge - 04:00 UTC, after both silver jobs (02:00, 03:00) have run
+        events.Rule(
+            self, "DailyGoldSchedule",
+            schedule=events.Schedule.cron(minute="0", hour="4"),
+            targets=[targets.LambdaFunction(gold_fn)],
+        )
 
 
