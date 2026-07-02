@@ -1,4 +1,5 @@
 import aws_cdk as cdk
+from aws_cdk import aws_lambda_destinations as destinations
 from aws_cdk import (
     aws_ec2 as ec2,
     aws_iam as iam,
@@ -63,6 +64,8 @@ class InfrastructureStack(cdk.Stack):
             ],
         )
 
+        self.vpc = vpc
+
         # S3 Gateway Endpoint
         vpc.add_gateway_endpoint(
             "S3Endpoint",
@@ -112,6 +115,24 @@ class InfrastructureStack(cdk.Stack):
             ],
         )
 
+        # add discord notifier role for failed jobs monitoring
+        notifier_role = iam.Role(self, "DiscordNotifierRole", assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+                                 managed_policies=[
+                                     iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+                                 ],
+        )
+        
+        # discord notifier function for failed jobs monitoring
+        notifier_fn = lambda_.Function(self, "DiscordNotifier", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler", 
+                                    code=lambda_.Code.from_asset("../app/notifications/discord_notifier"), role=notifier_role,
+                                    memory_size=512,  timeout=Duration.minutes(10),  
+                                    environment={
+                                        "DISCORD_WEBHOOK_URL": os.environ.get("DISCORD_WEBHOOK_URL", ""),
+                                    },
+        )
+        self.notifier_fn = notifier_fn
+
+
         lambda_role = iam.Role(
             self,
             "HackerNewsLambdaRole",
@@ -148,6 +169,7 @@ class InfrastructureStack(cdk.Stack):
             role=lambda_role,
             memory_size=128,
             timeout=Duration.minutes(10), 
+            on_failure=destinations.LambdaDestination(notifier_fn),
             environment={
                 "BRONZE_BUCKET": bronze_bucket.bucket_name,
                 "MAX_PUTS": "500",  # set a 0 for unlimited S3 PUTs
@@ -158,11 +180,15 @@ class InfrastructureStack(cdk.Stack):
         pandas_layer = lambda_.LayerVersion.from_layer_version_arn(self, "PandasLayer",
                                                                    "arn:aws:lambda:eu-central-1:336392948345:layer:AWSSDKPandas-Python312:27",)
         
+        self.pandas_layer = pandas_layer
+        
         # add lambda fucntion for twitter data ingestion and filtering
         bronze_twitter_fn = lambda_.Function(self, "TwitterIngestor", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler", 
                                     code=lambda_.Code.from_asset("../app/bronze/twitter"), role=bronze_twitter_role, layers=[pandas_layer],
                                     ephemeral_storage_size=cdk.Size.mebibytes(1024),
                                     memory_size=512,  timeout=Duration.minutes(10),  
+                                    on_failure=destinations.LambdaDestination(notifier_fn),
+                                    retry_attempts=0,
                                     environment={
                                         "BRONZE_TWITTER_BUCKET": bronze_bucket.bucket_name,
                                         "KAGGLE_KEY": os.environ.get("KAGGLE_KEY", ""),
@@ -214,6 +240,7 @@ class InfrastructureStack(cdk.Stack):
                                     code=lambda_.Code.from_asset("../app/silver/twitter"), role=silver_twitter_role, layers=[pandas_layer],
                                     memory_size=512,  timeout=Duration.minutes(5),
                                     vpc=vpc, vpc_subnets=isolated_subnets, security_groups=[silver_twitter_sg],
+                                    on_failure=destinations.LambdaDestination(notifier_fn), 
                                     environment={
                                         "BRONZE_TWITTER_BUCKET": bronze_bucket.bucket_name,
                                         "SILVER_TWITTER_BUCKET": silver_bucket.bucket_name,
@@ -253,6 +280,7 @@ class InfrastructureStack(cdk.Stack):
             vpc=vpc,
             vpc_subnets=isolated_subnets,
             security_groups=[silver_hn_sg],
+            on_failure=destinations.LambdaDestination(notifier_fn),
             environment={
                 "BRONZE_HN_BUCKET": bronze_bucket.bucket_name,
                 "SILVER_HN_BUCKET": silver_bucket.bucket_name,
@@ -277,6 +305,8 @@ class InfrastructureStack(cdk.Stack):
                 s3.LifecycleRule(expiration=Duration.days(14)),
             ],
         )
+
+        self.gold_bucket = gold_bucket
 
         gold_role = iam.Role(
             self, "GoldProcessorRole",
@@ -306,6 +336,7 @@ class InfrastructureStack(cdk.Stack):
             vpc=vpc,
             vpc_subnets=isolated_subnets,
             security_groups=[gold_sg],
+            on_failure=destinations.LambdaDestination(notifier_fn),
             environment={
                 "SILVER_BUCKET": silver_bucket.bucket_name,
                 "GOLD_BUCKET": gold_bucket.bucket_name,
