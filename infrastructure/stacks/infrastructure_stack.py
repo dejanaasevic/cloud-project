@@ -69,6 +69,36 @@ class InfrastructureStack(cdk.Stack):
             service=ec2.GatewayVpcEndpointAwsService.S3,
         )
 
+        # AWS-managed prefix list for the S3 gateway endpoint, used to scope security group
+        # egress to "S3 in this region" instead of a broad 0.0.0.0/0 rule.
+        ec2_client = boto3.client("ec2", region_name=region_name)
+        s3_prefix_list_id = ec2_client.describe_managed_prefix_lists(
+            Filters=[{"Name": "prefix-list-name", "Values": [f"com.amazonaws.{region_name}.s3"]}]
+        )["PrefixLists"][0]["PrefixListId"]
+
+        def create_s3_only_security_group(sg_construct_id: str, description: str) -> ec2.SecurityGroup:
+            """A security group for VPC-isolated Lambdas that only ever talk to S3.
+
+            No ingress (Lambda doesn't accept inbound network connections) and egress
+            is limited to HTTPS toward the S3 prefix list, since these functions have
+            no other network dependency and sit in a subnet with no NAT/IGW route anyway.
+            """
+            security_group = ec2.SecurityGroup(
+                self,
+                sg_construct_id,
+                vpc=vpc,
+                description=description,
+                allow_all_outbound=False,
+            )
+            security_group.add_egress_rule(
+                peer=ec2.Peer.prefix_list(s3_prefix_list_id),
+                connection=ec2.Port.tcp(443),
+                description="HTTPS to S3 gateway endpoint only",
+            )
+            return security_group
+
+        isolated_subnets = ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED)
+
         # ==== S3 Bronze Bucket ====
         bronze_bucket = get_or_create_bucket(
             "BronzeBucket",
@@ -165,19 +195,25 @@ class InfrastructureStack(cdk.Stack):
 
         # allow silver twitter role to read from the bronze bucket and read/write to the silver bucket
         silver_twitter_role = iam.Role(
-            self, "SilverTwitterRole", assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"), 
+            self, "SilverTwitterRole", assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
             managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole"),
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaVPCAccessExecutionRole"),
             ],
         )
 
         bronze_bucket.grant_read(silver_twitter_role)
         silver_bucket.grant_read_write(silver_twitter_role)
 
+        silver_twitter_sg = create_s3_only_security_group(
+            "SilverTwitterSecurityGroup", "SilverTwitterProcessor: HTTPS to S3 only"
+        )
+
         # add lambda fucntion for twitter data normalization
-        silver_twitter_fn = lambda_.Function(self, "SilverTwitterProcessor", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler", 
+        silver_twitter_fn = lambda_.Function(self, "SilverTwitterProcessor", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler",
                                     code=lambda_.Code.from_asset("../app/silver/twitter"), role=silver_twitter_role, layers=[pandas_layer],
-                                    memory_size=512,  timeout=Duration.minutes(5),  
+                                    memory_size=512,  timeout=Duration.minutes(5),
+                                    vpc=vpc, vpc_subnets=isolated_subnets, security_groups=[silver_twitter_sg],
                                     environment={
                                         "BRONZE_TWITTER_BUCKET": bronze_bucket.bucket_name,
                                         "SILVER_TWITTER_BUCKET": silver_bucket.bucket_name,
@@ -193,12 +229,17 @@ class InfrastructureStack(cdk.Stack):
             self, "SilverHackerNewsRole",
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
             managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole"),
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaVPCAccessExecutionRole"),
             ],
         )
 
         bronze_bucket.grant_read(silver_hn_role)
         silver_bucket.grant_read_write(silver_hn_role)
+
+        silver_hn_sg = create_s3_only_security_group(
+            "SilverHackerNewsSecurityGroup", "SilverHackerNewsProcessor: HTTPS to S3 only"
+        )
 
         silver_hn_fn = lambda_.Function(
             self, "SilverHackerNewsProcessor",
@@ -209,6 +250,9 @@ class InfrastructureStack(cdk.Stack):
             layers=[pandas_layer],
             memory_size=512,
             timeout=Duration.minutes(10),
+            vpc=vpc,
+            vpc_subnets=isolated_subnets,
+            security_groups=[silver_hn_sg],
             environment={
                 "BRONZE_HN_BUCKET": bronze_bucket.bucket_name,
                 "SILVER_HN_BUCKET": silver_bucket.bucket_name,
@@ -238,12 +282,17 @@ class InfrastructureStack(cdk.Stack):
             self, "GoldProcessorRole",
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
             managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole"),
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaVPCAccessExecutionRole"),
             ],
         )
 
         silver_bucket.grant_read(gold_role)
         gold_bucket.grant_read_write(gold_role)
+
+        gold_sg = create_s3_only_security_group(
+            "GoldProcessorSecurityGroup", "GoldProcessor: HTTPS to S3 only"
+        )
 
         gold_fn = lambda_.Function(
             self, "GoldProcessor",
@@ -254,6 +303,9 @@ class InfrastructureStack(cdk.Stack):
             layers=[pandas_layer],
             memory_size=512,
             timeout=Duration.minutes(10),
+            vpc=vpc,
+            vpc_subnets=isolated_subnets,
+            security_groups=[gold_sg],
             environment={
                 "SILVER_BUCKET": silver_bucket.bucket_name,
                 "GOLD_BUCKET": gold_bucket.bucket_name,
