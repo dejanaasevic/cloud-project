@@ -1,4 +1,5 @@
 import aws_cdk as cdk
+from aws_cdk import aws_lambda_destinations as destinations
 from aws_cdk import (
     aws_ec2 as ec2,
     aws_iam as iam,
@@ -82,6 +83,23 @@ class InfrastructureStack(cdk.Stack):
             ],
         )
 
+        # add discord notifier role for failed jobs monitoring
+        notifier_role = iam.Role(self, "DiscordNotifierRole", assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+                                 managed_policies=[
+                                     iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole")
+                                 ],
+        )
+        
+        # discord notifier function for failed jobs monitoring
+        notifier_fn = lambda_.Function(self, "DiscordNotifier", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler", 
+                                    code=lambda_.Code.from_asset("../app/notifications/discord_notifier"), role=notifier_role,
+                                    memory_size=512,  timeout=Duration.minutes(10),  
+                                    environment={
+                                        "DISCORD_WEBHOOK_URL": os.environ.get("DISCORD_WEBHOOK_URL", ""),
+                                    },
+        )
+
+
         lambda_role = iam.Role(
             self,
             "HackerNewsLambdaRole",
@@ -118,6 +136,7 @@ class InfrastructureStack(cdk.Stack):
             role=lambda_role,
             memory_size=128,
             timeout=Duration.minutes(10), 
+            on_failure=destinations.LambdaDestination(notifier_fn),
             environment={
                 "BRONZE_BUCKET": bronze_bucket.bucket_name,
                 "MAX_PUTS": "500",  # set a 0 for unlimited S3 PUTs
@@ -133,6 +152,8 @@ class InfrastructureStack(cdk.Stack):
                                     code=lambda_.Code.from_asset("../app/bronze/twitter"), role=bronze_twitter_role, layers=[pandas_layer],
                                     ephemeral_storage_size=cdk.Size.mebibytes(1024),
                                     memory_size=512,  timeout=Duration.minutes(10),  
+                                    on_failure=destinations.LambdaDestination(notifier_fn),
+                                    retry_attempts=0,
                                     environment={
                                         "BRONZE_TWITTER_BUCKET": bronze_bucket.bucket_name,
                                         "KAGGLE_KEY": os.environ.get("KAGGLE_KEY", ""),
@@ -177,7 +198,8 @@ class InfrastructureStack(cdk.Stack):
         # add lambda fucntion for twitter data normalization
         silver_twitter_fn = lambda_.Function(self, "SilverTwitterProcessor", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler", 
                                     code=lambda_.Code.from_asset("../app/silver/twitter"), role=silver_twitter_role, layers=[pandas_layer],
-                                    memory_size=512,  timeout=Duration.minutes(5),  
+                                    memory_size=512,  timeout=Duration.minutes(5), 
+                                    on_failure=destinations.LambdaDestination(notifier_fn), 
                                     environment={
                                         "BRONZE_TWITTER_BUCKET": bronze_bucket.bucket_name,
                                         "SILVER_TWITTER_BUCKET": silver_bucket.bucket_name,
@@ -209,6 +231,7 @@ class InfrastructureStack(cdk.Stack):
             layers=[pandas_layer],
             memory_size=512,
             timeout=Duration.minutes(10),
+            on_failure=destinations.LambdaDestination(notifier_fn),
             environment={
                 "BRONZE_HN_BUCKET": bronze_bucket.bucket_name,
                 "SILVER_HN_BUCKET": silver_bucket.bucket_name,
@@ -254,6 +277,7 @@ class InfrastructureStack(cdk.Stack):
             layers=[pandas_layer],
             memory_size=512,
             timeout=Duration.minutes(10),
+            on_failure=destinations.LambdaDestination(notifier_fn),
             environment={
                 "SILVER_BUCKET": silver_bucket.bucket_name,
                 "GOLD_BUCKET": gold_bucket.bucket_name,
