@@ -64,6 +64,8 @@ class InfrastructureStack(cdk.Stack):
             ],
         )
 
+        self.vpc = vpc
+
         # S3 Gateway Endpoint
         vpc.add_gateway_endpoint(
             "S3Endpoint",
@@ -98,6 +100,7 @@ class InfrastructureStack(cdk.Stack):
                                         "DISCORD_WEBHOOK_URL": os.environ.get("DISCORD_WEBHOOK_URL", ""),
                                     },
         )
+        self.notifier_fn = notifier_fn
 
 
         lambda_role = iam.Role(
@@ -146,6 +149,8 @@ class InfrastructureStack(cdk.Stack):
         # add layer for pandas importing since its not included in the default aws lambda environment
         pandas_layer = lambda_.LayerVersion.from_layer_version_arn(self, "PandasLayer",
                                                                    "arn:aws:lambda:eu-central-1:336392948345:layer:AWSSDKPandas-Python312:27",)
+        
+        self.pandas_layer = pandas_layer
         
         # add lambda fucntion for twitter data ingestion and filtering
         bronze_twitter_fn = lambda_.Function(self, "TwitterIngestor", runtime=lambda_.Runtime.PYTHON_3_12, handler="handler.lambda_handler", 
@@ -256,6 +261,8 @@ class InfrastructureStack(cdk.Stack):
                 s3.LifecycleRule(expiration=Duration.days(14)),
             ],
         )
+
+        self.gold_bucket = gold_bucket
 
         gold_role = iam.Role(
             self, "GoldProcessorRole",
