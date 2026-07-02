@@ -1,4 +1,5 @@
 import aws_cdk as cdk
+import boto3
 from aws_cdk import aws_lambda_destinations as destinations
 
 from aws_cdk import (
@@ -106,9 +107,10 @@ class VisualizationStack(Stack):
             description=(
                 "Security group for the Gold-to-PostgreSQL Lambda."
             ),
-            allow_all_outbound=True,
+            allow_all_outbound=False,
         )
 
+        
         server_security_group = ec2.SecurityGroup(
             self,
             "VisualizationServerSecurityGroup",
@@ -181,6 +183,30 @@ class VisualizationStack(Stack):
             ],
             private_dns_enabled=True,
             open=False,
+        )
+
+        
+        region_name = boto3.session.Session().region_name or self.region
+        s3_prefix_list_id = boto3.client(
+            "ec2", region_name=region_name
+        ).describe_managed_prefix_lists(
+            Filters=[{"Name": "prefix-list-name", "Values": [f"com.amazonaws.{region_name}.s3"]}]
+        )["PrefixLists"][0]["PrefixListId"]
+
+        lambda_security_group.add_egress_rule(
+            peer=ec2.Peer.prefix_list(s3_prefix_list_id),
+            connection=ec2.Port.tcp(443),
+            description="HTTPS to S3 gateway endpoint only",
+        )
+        lambda_security_group.add_egress_rule(
+            peer=endpoint_security_group,
+            connection=ec2.Port.tcp(443),
+            description="HTTPS to Secrets Manager endpoint only",
+        )
+        lambda_security_group.add_egress_rule(
+            peer=server_security_group,
+            connection=ec2.Port.tcp(5432),
+            description="PostgreSQL to visualization server only",
         )
 
         # =============== EC2 role ===============
