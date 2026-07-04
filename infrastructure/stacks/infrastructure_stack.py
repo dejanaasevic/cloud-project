@@ -201,12 +201,12 @@ class InfrastructureStack(cdk.Stack):
 
         # EventBridge Daily Schedule
         # Runs at 01:00 UTC every day
-        # events.Rule(
-        #     self,
-        #     "DailyHackerNewsSchedule",
-        #     schedule=events.Schedule.cron(minute="0", hour="1"),
-        #     targets=[targets.LambdaFunction(hacker_news_fn)],
-        # )
+        events.Rule(
+            self,
+            "DailyHackerNewsSchedule",
+            schedule=events.Schedule.cron(minute="0", hour="1"),
+            targets=[targets.LambdaFunction(hacker_news_fn)],
+        )
 
         # silver bucket
         silver_bucket = get_or_create_bucket(
@@ -287,12 +287,12 @@ class InfrastructureStack(cdk.Stack):
             },
         )
 
-        # silver HN event bridge
-        # events.Rule(
-        #     self, "DailySilverHackerNewsSchedule",
-        #     schedule=events.Schedule.cron(minute="0", hour="3"),
-        #     targets=[targets.LambdaFunction(silver_hn_fn)],
-        # )
+        # silver HN event bridge - 03:00 UTC
+        events.Rule(
+            self, "DailySilverHackerNewsSchedule",
+            schedule=events.Schedule.cron(minute="0", hour="3"),
+            targets=[targets.LambdaFunction(silver_hn_fn)],
+        )
 
         # ==== Gold Layer ====
 
